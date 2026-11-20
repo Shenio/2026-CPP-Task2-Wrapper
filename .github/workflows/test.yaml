@@ -1,0 +1,118 @@
+name: CMake Build, Static and Memory Analysis
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: "Build: Release Mode"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_CXX_FLAGS="-Wall -Wextra -Werror"
+
+      - name: Build Project
+        run: cmake --build build --config Release
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: build-artifacts
+          path: build/
+          retention-days: 1
+
+  static-analysis:
+    name: "Check: Static Linters"
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Linters
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck clang-tidy
+          pip3 install lizard --break-system-packages
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: build-artifacts
+          path: build/
+
+      - name: Run Analyses
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          
+          echo "=== LIZARD REPORT ===" > artifacts/static_analysis.log
+          lizard src/ -C 18 >> artifacts/static_analysis.log 2>&1 || true
+          
+          echo -e "\n=== CPPCHECK REPORT ===" >> artifacts/static_analysis.log
+          cppcheck --enable=warning,performance,portability --std=c++17 --language=c++ --inline-suppr --suppress=missingIncludeSystem --suppress=unusedFunction --quiet src/ >> artifacts/static_analysis.log 2>&1 || true
+          
+          echo -e "\n=== CLANG-TIDY REPORT ===" >> artifacts/static_analysis.log
+          find src/ -name "*.cpp" | xargs -r clang-tidy -p build/ --checks='-*,bugprone-*,modernize-*,performance-*,readability-*,-modernize-use-trailing-return-type' >> artifacts/static_analysis.log 2>&1 || true
+
+      - name: Upload Static Analysis Log
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: static-analysis-log
+          path: artifacts/static_analysis.log
+          retention-days: 3
+
+      - name: Verify Strict Rules
+        shell: bash
+        run: |
+          lizard src/ -C 18
+          cppcheck --enable=warning,performance,portability --std=c++17 --language=c++ --inline-suppr --suppress=missingIncludeSystem --suppress=unusedFunction --quiet --error-exitcode=1 src/
+          set -o pipefail
+          find src/ -name "*.cpp" | xargs -r clang-tidy -p build/ --checks='-*,bugprone-*,modernize-*,performance-*,readability-*,-modernize-use-trailing-return-type' --warnings-as-errors='*'
+
+  memory-check:
+    name: "Check: Memory Sanitizers (ASan/UBSan)"
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Configure CMake with Sanitizers
+        env:
+          CXXFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer"
+          LDFLAGS: "-fsanitize=address,undefined"
+        run: cmake -B build-sanitizers -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build with Sanitizers
+        run: cmake --build build-sanitizers --config Debug
+
+      - name: Run Applications with Sanitizers
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ASAN_OPTIONS=detect_leaks=1:halt_on_error=1
+          export UBSAN_OPTIONS=halt_on_error=1
+          mapfile -d '' -t executables < <(find build-sanitizers -type f -perm -u+x ! -path '*/CMakeFiles/*' ! -name '*.so*' ! -name '*.a' -print0)
+          if [ ${#executables[@]} -eq 0 ]; then
+            echo "No executables found in build-sanitizers"
+            exit 1
+          fi
+          for exe in "${executables[@]}"; do
+            echo "=== $exe ==="
+            timeout 60 "$exe"
+          done 2>&1 | tee build-sanitizers/memory_test.log
+
+      - name: Upload Memory Test Log
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: memory-test-log
+          path: build-sanitizers/memory_test.log
+          retention-days: 3

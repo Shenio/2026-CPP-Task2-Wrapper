@@ -1,0 +1,12 @@
+compilation_database_dir: build
+output_directory: docs/diagrams
+diagrams:
+  pr_class_diagram:
+    type: class
+    glob:
+      - src/**/*.cpp
+      - src/**/*.h
+      - src/**/*.hpp
+    # Отключает генерацию полных типов аргументов со значениями по умолчанию, 
+    # оставляя только типы данных, что решает проблему с ошибкой парсинга в Mermaid
+    generate_method_arguments: none
